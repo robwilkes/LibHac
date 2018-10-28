@@ -1,41 +1,28 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 
 namespace LibHac.IO
 {
     public class Aes128CtrExStorage : Aes128CtrStorage
     {
-        public AesSubsectionBlock AesSubsectionBlock { get; }
         private List<AesSubsectionEntry> SubsectionEntries { get; } = new List<AesSubsectionEntry>();
         private List<long> SubsectionOffsets { get; }
+        private BucketTree<AesSubsectionEntry> BucketTree { get; }
 
         public Aes128CtrExStorage(Storage baseStorage, byte[] key, long counterOffset, byte[] ctrHi, BktrPatchInfo bktr, bool keepOpen)
             : base(baseStorage, key, counterOffset, keepOpen, ctrHi)
         {
             BktrHeader header = bktr.EncryptionHeader;
+            var headerStorage = new MemoryStorage(header.Header);
 
-            MemoryStorage headerStorage = new MemoryStorage(bktr.EncryptionHeader.Header);
-            SubStorage dataStorage =
+            SubStorage bucketTreeStorage =
                 new CachedStorage(new Aes128CtrStorage(baseStorage, key, counterOffset, true, ctrHi), 0x4000, 4, false)
                     .Slice(header.Offset, header.Size);
 
-            var bucketTree = new BucketTree(headerStorage, dataStorage);
+            BucketTree = new BucketTree<AesSubsectionEntry>(headerStorage, bucketTreeStorage);
 
-            byte[] subsectionBytes;
-            using (var streamDec = new CachedStorage(new Aes128CtrStorage(baseStorage, key, counterOffset, true, ctrHi), 0x4000, 4, false))
-            {
-                subsectionBytes = new byte[header.Size];
-                streamDec.Read(subsectionBytes, header.Offset);
-            }
-
-            using (var reader = new BinaryReader(new MemoryStream(subsectionBytes)))
-            {
-                AesSubsectionBlock = new AesSubsectionBlock(reader);
-            }
-
-            foreach (AesSubsectionBucket bucket in AesSubsectionBlock.Buckets)
+            foreach (BucketTreeBucket<AesSubsectionEntry> bucket in BucketTree.Buckets)
             {
                 SubsectionEntries.AddRange(bucket.Entries);
             }
@@ -47,6 +34,7 @@ namespace LibHac.IO
                 Counter = (uint)(ctrHi[4] << 24 | ctrHi[5] << 16 | ctrHi[6] << 8 | ctrHi[7]),
                 OffsetEnd = long.MaxValue
             };
+
             SubsectionEntries.Add(headerSubsection);
 
             for (int i = 0; i < SubsectionEntries.Count - 1; i++)
@@ -63,7 +51,6 @@ namespace LibHac.IO
             AesSubsectionEntry entry = GetSubsectionEntry(offset);
             UpdateCounterSubsection(entry.Counter);
 
-            int totalBytesRead = 0;
             long inPos = offset;
             int outPos = 0;
             int remaining = destination.Length;
@@ -75,7 +62,6 @@ namespace LibHac.IO
 
                 outPos += bytesRead;
                 inPos += bytesRead;
-                totalBytesRead += bytesRead;
                 remaining -= bytesRead;
 
                 if (inPos >= entry.OffsetEnd)
@@ -89,7 +75,7 @@ namespace LibHac.IO
                 }
             }
 
-            return totalBytesRead;
+            return outPos;
         }
 
         private AesSubsectionEntry GetSubsectionEntry(long offset)
